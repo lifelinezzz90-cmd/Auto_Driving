@@ -53,8 +53,9 @@
 
 - **仿真环境**：8 m × 8 m 非对称封闭房间（L 型走廊 + 多组圆柱/方柱障碍）；参数化差速底盘 URDF/Xacro + 360° / 10 Hz RPLIDAR（含高斯测距噪声）。
 - **SLAM 建图**：SLAM Toolbox 异步位姿图优化（扫描匹配 + Ceres 后端 + 回环检测），输出 0.05 m 高分辨率栅格地图。
-- **方案 A · Nav2 工业级导航**：AMCL 粒子滤波自定位 + 双层代价地图膨胀 + NavFn 全局规划 + DWB 局部轨迹采样，支持已知静态地图导航与实时 SLAM 联调两种模式。
+- **方案 A · Nav2 工业级导航**：AMCL 粒子滤波自定位 + 双层代价地图膨胀 + NavFn 全局规划 + DWB 局部轨迹采样，含**两种运行模式**（已知静态地图导航 / 实时 SLAM 联调）。
 - **方案 B · APF 人工势场**：自研反应式避障节点，按距离平方反比生成斥力场，正前方死锁时原地自旋脱困；无需先验地图，CPU 占用极低。
+- **三种导航模式**：方案 A 的两种模式 + 方案 B，共三种可独立运行的自主导航方式，详见[快速开始](#快速开始)。
 - **双方案同场对比**：从先验要求、规划机制、资源占用、路径最优性、鲁棒性、适用场景等维度系统对比。
 - **自动化工具**：一键编排与可视化脚本（Nav2 / APF 全流程录制、TF 树导出、地图标注等）。
 
@@ -123,7 +124,7 @@ Auto_Driving/
 | 实验 | 内容 | 关键产物 | 状态 |
 |---|---|---|---|
 | [`lab01_http_car`](experiments/lab01_http_car/) | `cmd_vel → HTTP` 桥接 → 云衍小车；键盘遥操作与 ESP32 固件 | 桥接节点、固件、双层看门狗 | ✅ 完成 |
-| [`lab02_sim_slam_nav`](experiments/lab02_sim_slam_nav/) | Gazebo 差速车与雷达仿真、SLAM 建图、Nav2 / APF 自主导航 | 仿真世界、栅格地图、双导航方案 | ✅ M1 / M2 / M3 完成 |
+| [`lab02_sim_slam_nav`](experiments/lab02_sim_slam_nav/) | Gazebo 差速车与雷达仿真、SLAM 建图、Nav2 / APF 三种自主导航模式 | 仿真世界、栅格地图、双导航方案 | ✅ M1 / M2 / M3 完成 |
 
 ---
 
@@ -166,7 +167,7 @@ python3 -m pip install pyyaml numpy pillow matplotlib opencv-python
 ### 3. 获取代码
 
 ```bash
-git clone https://github.com/lifelinezzz90/Auto_Driving.git
+git clone https://github.com/lifelinezzz90-cmd/Auto_Driving.git
 cd Auto_Driving
 export REPO_ROOT=$PWD
 ```
@@ -256,20 +257,26 @@ ros2 run yunyan_bringup car_teleop
 ros2 run nav2_map_server map_saver_cli -f src/yunyan_nav/maps/slam_room_map
 ```
 
-**M3 · 自主导航（双方案）**
+**M3 · 自主导航（三种模式）**
+
+方案 A（Nav2）含两种模式，方案 B（APF）为一种，共**三种可独立运行的导航模式**。三种模式共享同一条终端 1 命令：
 
 ```bash
-# 方案 B：APF 无地图避障（小车自动 0.18 m/s 前行避障）
+# 终端 1（三种模式通用）：启动 Gazebo 仿真环境
 ros2 launch yunyan_sim sim_bringup.launch.py
-ros2 run yunyan_nav apf_avoidance
-
-# 方案 A 模式 1：Nav2 加载已保存静态地图
-ros2 launch yunyan_nav nav2_sim.launch.py
-# 在 RViz 顶部点击 2D Goal Pose，给定目标点与航向角即可自主导航
-
-# 方案 A 模式 2：实时 SLAM + Nav2 联调
-ros2 launch yunyan_nav nav2_sim.launch.py slam:=True
 ```
+
+各模式的终端 2 命令与说明：
+
+| 验收 | 运行模式 | 终端 2 启动命令 | 适用场景 |
+|---|---|---|---|
+| 验收 1 | **方案 B · APF 反应式避障** | `ros2 run yunyan_nav apf_avoidance` | 无地图巡游、算力受限、紧急防撞保底 |
+| 验收 2 | **方案 A 模式 1 · Nav2 静态地图导航** | `ros2 launch yunyan_nav nav2_sim.launch.py` | 已知地图、点对点全局最优寻路 |
+| 验收 3 | **方案 A 模式 2 · Nav2 + 实时 SLAM 联调** | `ros2 launch yunyan_nav nav2_sim.launch.py slam:=True` | 未知环境探索、边建图边导航 |
+
+- **验收 1（APF）**：小车无地图自主巡游（0.18 m/s），遇墙与障碍平滑转向避让；正前方距离 < 0.35 m 时自动停车并原地旋转脱困。
+- **验收 2（Nav2 静态地图）**：运行后在 RViz 点击 **2D Goal Pose** 给定目标点与航向角，观察全局绿色引导线与 DWB 局部避障，小车绕过障碍到达终点。
+- **验收 3（Nav2 + SLAM）**：点击 **2D Goal Pose** 指向未知 / 半探索区域，小车一边由 SLAM Toolbox 动态拓展栅格地图，一边实时更新代价地图前行。
 
 > APF 节点已设好初速度，启动后自动避障；Nav2 默认出生位姿已对齐原点 `(0, 0, 0)`。更多细节见 [`lab02 README`](experiments/lab02_sim_slam_nav/README.md)。
 
@@ -308,6 +315,7 @@ curl --noproxy '*' http://192.168.31.11/forward
 ros2 launch yunyan_sim sim_bringup.launch.py
 ros2 launch yunyan_nav slam_sim.launch.py
 ros2 run yunyan_nav apf_avoidance
+ros2 launch yunyan_nav nav2_sim.launch.py
 ros2 launch yunyan_nav nav2_sim.launch.py slam:=True
 ros2 run nav2_map_server map_saver_cli -f src/yunyan_nav/maps/slam_room_map
 ```
@@ -376,7 +384,7 @@ GPIO 12 是 ESP32 的 strapping 引脚（决定启动时 flash 电压），接�
 
 ## 安全须知
 
-- **软件保护不能替代硬件保护**：必须保留人工断电与硬件急停。MCU 整体卡死、供电或驱动故障无法靠软件兜住。
+- **软件保护不能替代硬件保护**：必须保留人工断电和硬件急停。MCU 整体卡死、供电或驱动故障无法靠软件兜住。
 - **首次测试请架空车轮**，确认方向映射（尤其左右转向）正确后再落地。
 - 车速由固件固定且偏快，第一次运行留足场地余量，手放在电源开关旁。
 - 退出时按 `q` 或 `Ctrl-C`，程序会显式补发一帧全零，车在 0.5 s 内停住。
