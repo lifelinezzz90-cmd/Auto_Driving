@@ -1,70 +1,96 @@
-# Auto_Driving
+# PadBot E2 (派宝 E2) ROS 2 Humble 真机控制与建图导航工程
 
-ROS 2 + ESP32 / PadBot E2 的移动机器人学习实验集。每个实验自包含：ROS 2 上位机包、固件/桥接代码、以及该实验的说明文档都放在 `experiments/<实验名>/` 下。
+本项目面向 **广州映博智能科技有限公司 PadBot E2（派宝 E2）模块化移动机器人平台**，提供基于 **Ubuntu 22.04 + ROS 2 Humble** 的上位机通信桥接、实地激光建图与地图导出、单点/多点自主导航及动态避障验证全套工程实现。
 
-## 实验列表
+> [!IMPORTANT]
+> **真机复现指引**：拿到派宝 E2 实车后，请直接参阅核心实操手册：  
+> 👉 **[派宝 E2 真机复现与建图导航实操手册](experiments/lab02_sim_slam_nav/README.md)**  
+> 原厂精简文本规范请参阅仓库根目录文档：  
+> 👉 **[`e2_ver_1_0_1.md`](e2_ver_1_0_1.md)**
 
-| 实验 | 内容 | 阶段进度 | 状态 |
-|---|---|---|---|
-| [`lab01_http_car`](experiments/lab01_http_car/) | `cmd_vel` → HTTP 桥接 → 云衍小车；含键盘遥操作与 ESP32 固件 | 完成 | ✅ |
-| [`lab02_sim_slam_nav`](experiments/lab02_sim_slam_nav/) | Gazebo 仿真、SLAM 建图、Nav2/APF 导航避障，以及派宝 E2 真机 HTTP 桥接与复现 SOP | **M1~M4.2 全部完成**（M4.2 = 真机复现手册 + Mock 产物清理） | ✅ |
+---
 
-> 派宝 E2 真机部署请直接阅读 **[实验 02 README：真机复现手册](experiments/lab02_sim_slam_nav/README.md)**；原厂手册精简文本见 [`e2_ver_1_0_1.md`](e2_ver_1_0_1.md)（仓库根目录，不放在 `src/` 下，原版 PDF 不入库）。
+## 一、核心技术路线
 
-## 目录结构
+- **现代跨平台架构**：原厂选配工控机默认采用已停止维护的 Ubuntu 18.04 + ROS 1 Melodic；本方案采用外部 **Ubuntu 22.04 + ROS 2 Humble** 上位机，通过标准网口以 **HTTP RESTful API（`/robot/api/v1.0/...`）**解耦对接 E2 内部 Linux 导航底盘。
+- **真机时间戳规范**：真机模式全局统一使用宿主机墙上时钟（**`use_sim_time: False`**）。
+- **底盘核心职责划分**：激光 SLAM 栅格建图、全局重定位与局部多传感器避障由 E2 底盘内置导航系统闭环完成；ROS 2 上位机负责标准生态对接（发布 `/e2/odom`、`/e2/map`、`/e2/plan`、`/e2/action_status`，广播 TF 树，集成 RViz2 可视化监控与工程级软限速防撞保护）。
+
+---
+
+## 二、仓库目录结构
 
 ```text
 Auto_Driving/
-├── e2_ver_1_0_1.md                 ← 派宝 E2 原厂手册精简文本规范
-├── README.md                       ← 本文件
+├── e2_ver_1_0_1.md                 ← 派宝 E2 原厂手册精简文本规范（硬件规格/接口/安全要求）
+├── README.md                       ← 本文件（项目主定位与快速索引）
 └── experiments/
-    ├── lab01_http_car/             ← 一个实验 = 一个独立 colcon 工作空间
-    │   ├── README.md
-    │   ├── src/
-    │   │   ├── control_learn/      # cmd_vel 订阅观察节点
-    │   │   └── yunyan_bringup/     # HTTP 桥接节点 + 键盘遥操作 + launch
-    │   └── firmware/
-    │       ├── README.md
-    │       └── yunyan_car/         # ESP32 固件（Arduino）
-    └── lab02_sim_slam_nav/         ← 仿真 + SLAM + Nav2 + E2 真机桥接
-        ├── README.md               # 派宝 E2 真机复现手册（6 章 SOP）；手册文本见仓库根目录
-        ├── e2_maps/                # 真机导出地图目录，仅 .gitkeep 入库
+    └── lab02_sim_slam_nav/         ← 派宝 E2 独立 colcon 工作空间
+        ├── README.md               # 派宝 E2 真机复现 SOP 实操手册（6 章详尽指南）
+        ├── e2_maps/                # 真机实景建图与一键导出目录（仅 .gitkeep 入库）
         │   └── .gitkeep
-        ├── report_assets/          # 报告配图与素材
-        ├── scripts/                # 可视化/流程辅助脚本
         └── src/
-            ├── yunyan_bringup/     # 键盘遥操作 /cmd_vel
-            ├── yunyan_sim/         # Gazebo 世界、URDF、仿真 launch
-            ├── yunyan_nav/         # SLAM Toolbox / Nav2 / APF 避障
-            └── yunyan_e2_bridge/   # E2 RESTful API 桥接、探针、巡航、Mock
+            └── yunyan_e2_bridge/   # 核心 ROS 2 桥接包（HTTP API 桥接、探针、巡航、Mock 及 RViz2）
+                ├── config/         # 桥接参数与航点配置
+                ├── launch/         # 真机与 Mock 启动脚本
+                ├── rviz/           # 1:1 三维监控预置视图
+                ├── urdf/           # E2 1:1 物理尺寸模型
+                └── yunyan_e2_bridge/ # 核心节点（client、bridge、probe、patrol、mock）
 ```
 
-`build/` `install/` `log/` 都是 colcon 产物，按实验各自生成，不入库；`e2_maps/*.map|pgm|yaml` 与 `/tmp/` 导出产物同样被忽略。
+> `build/`、`install/`、`log/` 为本地编译产物，`e2_maps/*.map|pgm|yaml` 为本地地图导出产物，均已由 [`.gitignore`](.gitignore) 自动忽略。
 
-## 环境要求
+---
 
-- Ubuntu 22.04 + ROS 2 Humble（`source /opt/ros/humble/setup.bash`）
-- Python 3.10
-- 实验 02 额外依赖：`ros-humble-slam-toolbox`、`ros-humble-navigation2`、`ros-humble-nav2-bringup`、`ros-humble-xacro`、`ros-humble-rviz2`、`python3-requests`、`python3-yaml`
-- Arduino IDE + ESP32 board package + [U8g2](https://github.com/olikraus/u8g2) 库（仅 lab01 烧录固件需要）
+## 三、环境要求与单包构建
 
-## 快速开始
-
-每个实验都是独立工作空间，**先进到实验目录再构建**：
+### 1. 系统与依赖安装（Ubuntu 22.04）
 
 ```bash
-cd ~/Auto_Driving/experiments/lab02_sim_slam_nav   # 或 lab01_http_car
+sudo apt update
+sudo apt install -y \
+  ros-humble-robot-state-publisher \
+  ros-humble-xacro \
+  ros-humble-rviz2 \
+  ros-humble-tf2-ros \
+  ros-humble-teleop-twist-keyboard \
+  python3-requests \
+  python3-yaml \
+  python3-flake8 \
+  python3-pytest
+```
+
+### 2. 独立单包编译
+
+```bash
+cd ~/Auto_Driving/experiments/lab02_sim_slam_nav
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install
+colcon build --packages-select yunyan_e2_bridge --symlink-install
 source install/setup.bash
 ```
 
-之后按对应实验 README 的步骤运行。真机模式必须使用 `mock:=false` 并显式传入 `base_url:=http://<E2_IP>:<Port>`，且全程 `use_sim_time: False`。
+---
 
-## 约定
+## 四、快速启动参考
 
-- **每个实验独立工作空间**：互不干扰，换实验只换目录，不用清理旧 build。
-- **凭据不入库**：Wi-Fi 密码等写进被 `.gitignore` 排除的本地文件，仓库只保留 `.example` 模板。
-- **大体积手册 PDF 不入库**：仓库只保留根目录 `e2_ver_1_0_1.md` 文本规范。
-- **提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/)**：`feat:` / `fix:` / `docs:` / `chore:` …
-- 分支：`main` 上只保留可运行状态，改动走 `feature/<名字>` 分支再合并。
+### 1. 真机在线联调（需接实车网口并获知 `<E2_IP>:<Port>`）
+
+```bash
+# 步骤 1：零移动只读接口诊断
+ros2 run yunyan_e2_bridge e2_probe --url http://<E2_IP>:<Port>
+
+# 步骤 2：启动桥接节点与 RViz2 监控
+ros2 launch yunyan_e2_bridge e2_bringup.launch.py mock:=false base_url:=http://<E2_IP>:<Port>
+
+# 步骤 3：启动标准键盘慢速遥控
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.2 -p turn:=0.4
+```
+
+### 2. 离线无真机 Mock 冒烟自检
+
+```bash
+# 启动内置 Mock HTTP Server + 动力学模拟 + RViz2
+ros2 launch yunyan_e2_bridge e2_bringup.launch.py mock:=true
+```
+
+详细的实操分步 SOP、安全红线 Checklist 与故障排查见 **[实验 02 详细手册](experiments/lab02_sim_slam_nav/README.md)**。
