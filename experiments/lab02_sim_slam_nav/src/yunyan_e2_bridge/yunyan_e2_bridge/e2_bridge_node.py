@@ -3,8 +3,10 @@
 import base64
 import io
 import json
+import logging
 import math
 import os
+import threading
 import time
 from typing import Any, List, Optional, Tuple
 
@@ -16,6 +18,11 @@ from geometry_msgs.msg import (
 )
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 import rclpy
+from rclpy.callback_groups import (
+    MutuallyExclusiveCallbackGroup,
+    ReentrantCallbackGroup,
+)
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -208,11 +215,18 @@ def _parse_occupancy_grid(
 
     if b64_candidate is not None:
         try:
+            from PIL import Image
+        except ImportError:
+            logging.getLogger('e2_bridge_node').warning(
+                'Missing Pillow, install via: sudo apt install python3-pil'
+            )
+            return None
+
+        try:
             if ',' in b64_candidate:
                 b64_candidate = b64_candidate.split(',', 1)[1]
             img_bytes = base64.b64decode(b64_candidate)
 
-            from PIL import Image
             img = Image.open(io.BytesIO(img_bytes)).convert('L')
             width, height = img.size
             img = img.transpose(Image.FLIP_TOP_BOTTOM)
@@ -232,8 +246,18 @@ def _parse_occupancy_grid(
                     )
 
             res = 0.05
+            ox, oy, oyaw = 0.0, 0.0, 0.0
             if isinstance(raw_data, dict):
                 res = float(raw_data.get('resolution', 0.05))
+                origin = raw_data.get('origin')
+                if isinstance(origin, dict):
+                    ox = float(origin.get('x', origin.get('X', 0.0)))
+                    oy = float(origin.get('y', origin.get('Y', 0.0)))
+                    oyaw = float(origin.get('yaw', origin.get('Yaw', 0.0)))
+                elif isinstance(origin, (list, tuple)):
+                    ox = float(origin[0]) if len(origin) > 0 else 0.0
+                    oy = float(origin[1]) if len(origin) > 1 else 0.0
+                    oyaw = float(origin[2]) if len(origin) > 2 else 0.0
 
             grid_msg = OccupancyGrid()
             grid_msg.header.frame_id = frame_id
@@ -243,10 +267,14 @@ def _parse_occupancy_grid(
             grid_msg.info.resolution = res
             grid_msg.info.width = width
             grid_msg.info.height = height
-            grid_msg.info.origin.position.x = 0.0
-            grid_msg.info.origin.position.y = 0.0
+            grid_msg.info.origin.position.x = ox
+            grid_msg.info.origin.position.y = oy
             grid_msg.info.origin.position.z = 0.0
-            grid_msg.info.origin.orientation.w = 1.0
+            qx, qy, qz, qw = yaw_to_quaternion(oyaw)
+            grid_msg.info.origin.orientation.x = qx
+            grid_msg.info.origin.orientation.y = qy
+            grid_msg.info.origin.orientation.z = qz
+            grid_msg.info.origin.orientation.w = qw
             grid_msg.data = data
             return grid_msg
         except Exception:
@@ -258,9 +286,9 @@ def _parse_occupancy_grid(
 class E2BridgeNode(Node):
     """ROS 2 Node bridging ROS topics/services with E2 RESTful API."""
 
-    def __init__(self) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize E2BridgeNode."""
-        super().__init__('e2_bridge_node')
+        super().__init__('e2_bridge_node', *args, **kwargs)
 
         # Declare parameters
         self.declare_parameter('base_url', 'http://127.0.0.1:8080')
@@ -272,18 +300,20 @@ class E2BridgeNode(Node):
         self.declare_parameter('teleop_step_dist', 0.15)
         self.declare_parameter('teleop_step_rad', 0.25)
         self.declare_parameter('teleop_min_interval', 0.25)
+        self.declare_parameter('teleop_watchdog_sec', 1.0)
         self.declare_parameter('odom_frame', 'map')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('publish_tf', True)
         self.declare_parameter('default_map_name', 'e2_real_scene')
-        self.declare_parameter(
-            'map_export_dir',
-            '~/Auto_Driving/experiments/lab02_sim_slam_nav/e2_maps/',
-        )
+        self.declare_parameter('map_export_dir', '')
+
+        # Callback Groups
+        self.high_priority_cb_group = ReentrantCallbackGroup()
+        self.slow_cb_group = MutuallyExclusiveCallbackGroup()
 
         # Get parameters
-        base_url = self.get_parameter('base_url').value
+        base_url = str(self.get_parameter('base_url').value)
         pose_rate = float(self.get_parameter('pose_poll_rate').value)
         action_rate = float(self.get_parameter('action_poll_rate').value)
         map_rate = float(self.get_parameter('map_poll_rate').value)
@@ -302,6 +332,9 @@ class E2BridgeNode(Node):
         self.teleop_min_interval = float(
             self.get_parameter('teleop_min_interval').value
         )
+        self.teleop_watchdog_sec = float(
+            self.get_parameter('teleop_watchdog_sec').value
+        )
         self.odom_frame = str(self.get_parameter('odom_frame').value)
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
@@ -309,30 +342,44 @@ class E2BridgeNode(Node):
         self.default_map_name = str(
             self.get_parameter('default_map_name').value
         )
-        self.map_export_dir = str(self.get_parameter('map_export_dir').value)
+        self.map_export_dir = str(
+            self.get_parameter('map_export_dir').value
+        ).strip()
 
         # REST client
         self.client = E2ApiClient(base_url=base_url)
         self.get_logger().info(f'E2 bridge initialized for: {base_url}')
 
-        # State tracking for edge-triggered emergency stop & map cache
+        # State tracking for edge-triggered stop, watchdog & map cache
+        self._cmd_lock = threading.Lock()
         self._last_cmd_nonzero = False
-        self._last_teleop_time = 0.0
+        self._last_nonzero_cmd_time = 0.0
+        self._last_teleop_send_time = 0.0
+        self._warned_diagonal_cmd = False
         self._last_occupancy_grid: Optional[OccupancyGrid] = None
         self._warned_unknown_map_format = False
 
-        # Subscriptions
+        # Subscriptions - High priority group
         self.sub_goal = self.create_subscription(
-            PoseStamped, '/goal_pose', self._on_goal_pose, 10
+            PoseStamped,
+            '/goal_pose',
+            self._on_goal_pose,
+            10,
+            callback_group=self.high_priority_cb_group,
         )
         self.sub_init = self.create_subscription(
             PoseWithCovarianceStamped,
             '/initialpose',
             self._on_initial_pose,
             10,
+            callback_group=self.high_priority_cb_group,
         )
         self.sub_cmd_vel = self.create_subscription(
-            Twist, '/cmd_vel', self._on_cmd_vel, 10
+            Twist,
+            '/cmd_vel',
+            self._on_cmd_vel,
+            10,
+            callback_group=self.high_priority_cb_group,
         )
 
         # Publishers
@@ -352,39 +399,72 @@ class E2BridgeNode(Node):
         self.pub_map = self.create_publisher(OccupancyGrid, '/e2/map', map_qos)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
-        # Services
-        self.srv_mapping = self.create_service(
-            Trigger, '/e2/switch_to_mapping', self._srv_switch_to_mapping
-        )
-        self.srv_start_new_mapping = self.create_service(
-            Trigger, '/e2/start_new_mapping', self._srv_start_new_mapping
-        )
-        self.srv_nav = self.create_service(
-            Trigger, '/e2/switch_to_navigation', self._srv_switch_to_nav
-        )
+        # Services - High priority: cancel navigation
         self.srv_cancel = self.create_service(
-            Trigger, '/e2/cancel_navigation', self._srv_cancel_nav
-        )
-        self.srv_save_map = self.create_service(
-            Trigger, '/e2/save_map', self._srv_save_map
-        )
-        self.srv_export_map = self.create_service(
-            Trigger, '/e2/export_map', self._srv_export_map
+            Trigger,
+            '/e2/cancel_navigation',
+            self._srv_cancel_nav,
+            callback_group=self.high_priority_cb_group,
         )
 
-        # Timers
+        # Services - Slow / heavy group
+        self.srv_mapping = self.create_service(
+            Trigger,
+            '/e2/switch_to_mapping',
+            self._srv_switch_to_mapping,
+            callback_group=self.slow_cb_group,
+        )
+        self.srv_start_new_mapping = self.create_service(
+            Trigger,
+            '/e2/start_new_mapping',
+            self._srv_start_new_mapping,
+            callback_group=self.slow_cb_group,
+        )
+        self.srv_nav = self.create_service(
+            Trigger,
+            '/e2/switch_to_navigation',
+            self._srv_switch_to_nav,
+            callback_group=self.slow_cb_group,
+        )
+        self.srv_save_map = self.create_service(
+            Trigger,
+            '/e2/save_map',
+            self._srv_save_map,
+            callback_group=self.slow_cb_group,
+        )
+        self.srv_export_map = self.create_service(
+            Trigger,
+            '/e2/export_map',
+            self._srv_export_map,
+            callback_group=self.slow_cb_group,
+        )
+
+        # Timers - Slow / polling group
         pose_period = 1.0 / max(0.5, pose_rate)
         action_period = 1.0 / max(0.5, action_rate)
         map_period = 1.0 / max(0.1, map_rate)
 
         self.pose_timer = self.create_timer(
-            pose_period, self._on_pose_poll_timer
+            pose_period,
+            self._on_pose_poll_timer,
+            callback_group=self.slow_cb_group,
         )
         self.action_timer = self.create_timer(
-            action_period, self._on_action_poll_timer
+            action_period,
+            self._on_action_poll_timer,
+            callback_group=self.slow_cb_group,
         )
         self.map_timer = self.create_timer(
-            map_period, self._on_map_poll_timer
+            map_period,
+            self._on_map_poll_timer,
+            callback_group=self.slow_cb_group,
+        )
+
+        # Watchdog Timer - High priority group (5 Hz = 0.2s)
+        self.watchdog_timer = self.create_timer(
+            0.2,
+            self._on_teleop_watchdog_timer,
+            callback_group=self.high_priority_cb_group,
         )
 
     def _parse_occupancy_grid(self, raw_data: Any) -> Optional[OccupancyGrid]:
@@ -448,25 +528,60 @@ class E2BridgeNode(Node):
             self.get_logger().warn('Failed to set assisted pose.')
 
     def _on_cmd_vel(self, msg: Twist) -> None:
-        """Handle manual teleop cmd_vel with edge-triggered cancel."""
+        """Handle manual teleop cmd_vel with edge cancel and watchdog."""
         linear_val = msg.linear.x
         angular_val = msg.angular.z
         is_zero = (abs(linear_val) < 1e-4 and abs(angular_val) < 1e-4)
 
-        if is_zero:
-            if self._last_cmd_nonzero:
-                self.get_logger().info(
-                    'Teleop falling edge detected: canceling goal.'
-                )
-                self.client.cancel_goal()
-                self._last_cmd_nonzero = False
+        should_cancel = False
+        should_dispatch = False
+        now = time.time()
+
+        with self._cmd_lock:
+            if is_zero:
+                if self._last_cmd_nonzero:
+                    self._last_cmd_nonzero = False
+                    should_cancel = True
+            else:
+                self._last_cmd_nonzero = True
+                self._last_nonzero_cmd_time = now
+                if (
+                    now - self._last_teleop_send_time
+                ) >= self.teleop_min_interval:
+                    self._last_teleop_send_time = now
+                    should_dispatch = True
+
+        if should_cancel:
+            self.get_logger().info(
+                'Teleop falling edge detected: canceling goal.'
+            )
+            self.client.cancel_goal()
             return
 
-        self._last_cmd_nonzero = True
-        now = time.time()
-        if (now - self._last_teleop_time) < self.teleop_min_interval:
+        if not should_dispatch:
             return
-        self._last_teleop_time = now
+
+        # P1-3: Handle diagonal motion by executing dominant axis
+        if abs(linear_val) >= 1e-4 and abs(angular_val) >= 1e-4:
+            if not self._warned_diagonal_cmd:
+                self.get_logger().info(
+                    'E2 chassis separates rectilinear and rotation motion; '
+                    'diagonal compound motion is not supported. '
+                    'Executing dominant axis.'
+                )
+                self._warned_diagonal_cmd = True
+
+            if abs(angular_val) > abs(linear_val):
+                rad = math.copysign(self.teleop_step_rad, angular_val)
+                vel = min(abs(angular_val), self.max_angular_vel)
+                vel = max(vel, 0.1)
+                self.client.move_rotation(rad, vel)
+            else:
+                dist = math.copysign(self.teleop_step_dist, linear_val)
+                vel = min(abs(linear_val), self.max_linear_vel)
+                vel = max(vel, 0.05)
+                self.client.move_rectilinear(dist, vel)
+            return
 
         if abs(linear_val) >= 1e-4:
             dist = math.copysign(self.teleop_step_dist, linear_val)
@@ -478,6 +593,25 @@ class E2BridgeNode(Node):
             vel = min(abs(angular_val), self.max_angular_vel)
             vel = max(vel, 0.1)
             self.client.move_rotation(rad, vel)
+
+    def _on_teleop_watchdog_timer(self) -> None:
+        """Check teleop watchdog and auto-brake on command stream timeout."""
+        now = time.time()
+        should_cancel = False
+        dt = 0.0
+        with self._cmd_lock:
+            if self._last_cmd_nonzero:
+                dt = now - self._last_nonzero_cmd_time
+                if dt > self.teleop_watchdog_sec:
+                    self._last_cmd_nonzero = False
+                    should_cancel = True
+
+        if should_cancel:
+            self.get_logger().warn(
+                f'Teleop watchdog timeout ({dt:.2f}s > '
+                f'{self.teleop_watchdog_sec:.2f}s): braking chassis.'
+            )
+            self.client.cancel_goal()
 
     def _on_pose_poll_timer(self) -> None:
         """Poll robot pose and publish odom and TF."""
@@ -626,7 +760,10 @@ class E2BridgeNode(Node):
         self, request: Trigger.Request, response: Trigger.Response
     ) -> Trigger.Response:
         """Service callback to export .map, .pgm, and .yaml files."""
-        export_dir = os.path.expanduser(self.map_export_dir)
+        if self.map_export_dir:
+            export_dir = os.path.expanduser(self.map_export_dir)
+        else:
+            export_dir = os.path.join(os.getcwd(), 'e2_maps')
         os.makedirs(export_dir, exist_ok=True)
         ts = time.strftime('%Y%m%d_%H%M%S')
         base_name = f'{self.default_map_name}_{ts}'
@@ -678,11 +815,13 @@ class E2BridgeNode(Node):
 
 
 def main(args: Optional[Any] = None) -> None:
-    """Entry point for E2BridgeNode."""
+    """Entry point for E2BridgeNode with multi-threaded executor."""
     rclpy.init(args=args)
     node = E2BridgeNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

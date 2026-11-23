@@ -19,6 +19,7 @@ def generate_launch_description():
     base_url = LaunchConfiguration('base_url')
     mock = LaunchConfiguration('mock')
     launch_rviz = LaunchConfiguration('launch_rviz')
+    map_export_dir = LaunchConfiguration('map_export_dir')
 
     declare_base_url_cmd = DeclareLaunchArgument(
         'base_url',
@@ -36,6 +37,12 @@ def generate_launch_description():
         'launch_rviz',
         default_value='true',
         description='Whether to launch RViz2',
+    )
+
+    declare_map_export_dir_cmd = DeclareLaunchArgument(
+        'map_export_dir',
+        default_value='',
+        description='Custom local directory to export map files',
     )
 
     pkg_share = FindPackageShare('yunyan_e2_bridge')
@@ -84,7 +91,11 @@ def generate_launch_description():
         output='screen',
         parameters=[
             params_path,
-            {'base_url': base_url},
+            {
+                'base_url': base_url,
+                'map_export_dir': map_export_dir,
+                'use_sim_time': False,
+            },
         ],
     )
 
@@ -95,6 +106,7 @@ def generate_launch_description():
         name='rviz2',
         arguments=['-d', rviz_config_path],
         output='screen',
+        parameters=[{'use_sim_time': False}],
         condition=IfCondition(launch_rviz),
     )
 
@@ -102,6 +114,7 @@ def generate_launch_description():
         declare_base_url_cmd,
         declare_mock_cmd,
         declare_launch_rviz_cmd,
+        declare_map_export_dir_cmd,
         robot_state_publisher_node,
         mock_server_node,
         bridge_node,

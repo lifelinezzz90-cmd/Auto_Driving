@@ -6,12 +6,13 @@ e2_bridge_node:
     map_poll_rate: 0.5
     map_frame: "map"
     default_map_name: "e2_real_scene"
-    map_export_dir: "~/Auto_Driving/experiments/lab02_sim_slam_nav/e2_maps/"
+    map_export_dir: ""
     max_linear_vel: 0.30
     max_angular_vel: 0.60
     teleop_step_dist: 0.15
     teleop_step_rad: 0.25
     teleop_min_interval: 0.25
+    teleop_watchdog_sec: 1.0
     odom_frame: "map"
     base_frame: "base_footprint"
     publish_tf: true

@@ -13,14 +13,14 @@
 - **工控机老旧环境彻底弃用**：原厂选配的无风扇工控机出厂预装 Ubuntu 18.04 + ROS 1 Melodic（手册 4.1.3 节），该软件栈已停止维护。**本工程完全不采用该环境**。
 - **解耦的 HTTP RESTful 架构**：派宝 E2 底盘内置 Linux 导航模块（提供 `/robot/api/v1.0/...` RESTful API）。外部上位机（支持任意预装 **Ubuntu 22.04 + ROS 2 Humble** 的笔记本电脑或工控设备）通过标准以太网网线或局域网 Wi-Fi，直接与 E2 底盘高速交互。
 - **真机时间戳规范**：真机复现模式下全局一律声明 **`use_sim_time: False`**。`e2_bringup.launch.py` 中的 `robot_state_publisher` 与桥接节点统一使用系统墙上时钟（Wall Clock），现场严禁启动任何仿真时钟。
-- **底盘核心职责划分**：真实的 SLAM 栅格建图、全局重定位、全局路径搜索与底层多传感器融合避障由 **E2 底盘内置导航系统**闭环完成；上位机 `yunyan_e2_bridge` 负责 ROS 2 标准生态桥接（发布 `/e2/odom`、`/e2/map`、`/e2/plan`、`/e2/action_status`，广播 `map -> odom -> base_footprint` TF 树，集成 RViz2 可视化监控与工程级软限速防撞保护）。
+- **底盘核心职责划分**：真实的 SLAM 栅格建图、全局重定位、全局路径搜索与底层多传感器融合避障由 **E2 底盘内置导航系统**闭环完成；上位机 `yunyan_e2_bridge` 负责 ROS 2 标准生态桥接（发布 `/e2/odom`、`/e2/map`、`/e2/plan`、`/e2/action_status`，广播 `map -> base_footprint` TF 树，集成 RViz2 可视化监控与工程级软限速防撞保护）。
 
 ```text
 [Ubuntu 22.04 + ROS 2 Humble 上位机]
   teleop_twist_keyboard  --/cmd_vel-->  yunyan_e2_bridge  --HTTP RESTful (GET/POST/PUT/DELETE)-->  [E2 底盘导航模块]
                                              |
                                              +-- 发布 /e2/odom, /e2/map, /e2/plan, /e2/action_status
-                                             +-- 广播 TF: map -> odom -> base_footprint
+                                             +-- 广播 TF: map -> base_footprint
                                              +-- RViz2 1:1 三维监控 (e2_view.rviz)
 ```
 
@@ -91,6 +91,7 @@ sudo apt install -y \
   ros-humble-teleop-twist-keyboard \
   python3-requests \
   python3-yaml \
+  python3-pil \
   python3-flake8 \
   python3-pytest
 ```
@@ -169,7 +170,7 @@ ros2 launch yunyan_e2_bridge e2_bringup.launch.py mock:=false base_url:=http://<
 # 检查底盘里程计更新
 ros2 topic echo /e2/odom --once
 
-# 检查 TF 坐标变换树（map -> odom -> base_footprint）
+# 检查 TF 坐标变换树（map -> base_footprint）
 ros2 run tf2_ros tf2_echo map base_footprint
 ```
 
@@ -196,10 +197,11 @@ ros2 service call /e2/start_new_mapping std_srvs/srv/Trigger
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.2 -p turn:=0.4
 ```
 
-> **操作规范**：
-> - 按键 `i/j/l/,` 进行点动微步移动；
-> - 遥控线速度已被桥接层内部硬锁在 `≤ 0.30 m/s`（远低于原厂建议的最大建图速度 `0.6 m/s`）；
-> - 键盘松手后 `/cmd_vel` 下降沿会自动触发制动刹停；
+> **操作规范与安全警示**：
+> - **键盘制动**：按 **`k` 键立即急停**，切勿仅靠松开方向键期待瞬停（桥接层已内置 `1.0s` 看门狗兜底刹停）；
+> - **按键方向**：仅使用 `i/,/j/l` 进行纯直行/纯旋转点动微步移动，**请勿使用 `u/o/m/.` 斜向组合键**（E2 底盘将直行与旋转拆分为独立接口，若输入斜向键将优先执行主导轴并记录提示）；
+> - **限速生效**：`-p speed:=0.2 -p turn:=0.4` 依赖 ROS 2 Humble 较新版本 `teleop_twist_keyboard`（>=2.4.1），若旧版本参数未生效可在启动后在键盘界面按 **`z` 键降速**（桥接层内部亦有 `0.30 m/s` 硬限幅兜底）；
+> - **重要安全警示**：`max_linear_vel: 0.30` 仅限制 `/cmd_vel` 键盘遥控指令；后续通过 `/goal_pose` 或 `e2_waypoint_patrol` 下发的自主导航任务由 E2 底盘按出厂默认速度（手册标称最高 `0.7 m/s`）全速执行，**实车测试时务必保持场地空旷并预先安排人员手扶物理急停按钮**；
 > - 遥控小车慢速环绕测绘场地一周，在 RViz2 中实时观测 `/e2/map` 黑色障碍物轮廓闭合，避免高速急转弯产生重影。
 
 3. **终端 C —— 一键保存并出图**：
@@ -211,9 +213,9 @@ ros2 service call /e2/export_map std_srvs/srv/Trigger
 ```
 
 - **预期现象**：服务返回 `success=True`，桥接包会在 `experiments/lab02_sim_slam_nav/e2_maps/` 目录下自动生成实地地图三件套：
-  - `e2_map_<timestamp>.map`：E2 原厂复合二进制地图文件；
-  - `e2_map_<timestamp>.pgm`：标准 ROS 栅格灰度图像（可直接图片浏览器预览）；
-  - `e2_map_<timestamp>.yaml`：ROS 2 Map Server 格式元数据文件（分辨率 `0.05`、原点坐标等）。
+  - `e2_real_scene_<timestamp>.map`：E2 原厂复合二进制地图文件；
+  - `e2_real_scene_<timestamp>.pgm`：标准 ROS 栅格灰度图像（可直接图片浏览器预览）；
+  - `e2_real_scene_<timestamp>.yaml`：ROS 2 Map Server 格式元数据文件（分辨率 `0.05`、原点坐标等）。
 
 > [!NOTE]
 > 导出的地图文件已被 `.gitignore` 规则屏蔽以防大图污染仓库。若仅需底盘内部保存而不下载到上位机，可调用 `ros2 service call /e2/save_map std_srvs/srv/Trigger`。
@@ -272,9 +274,12 @@ waypoints:
 ```
 
 #### 2. 启动多点自主巡航任务
+
+确保配置文件保存在 `experiments/lab02_sim_slam_nav/real_waypoints.yaml`，并在该目录下运行：
+
 ```bash
 ros2 run yunyan_e2_bridge e2_waypoint_patrol \
-  --ros-args -p waypoints_file:=/home/lifeline/Auto_Driving/experiments/lab02_sim_slam_nav/real_waypoints.yaml
+  --ros-args -p waypoints_file:=$(pwd)/real_waypoints.yaml
 ```
 
 #### 3. 多传感器动态避障验收
@@ -345,11 +350,11 @@ ros2 run yunyan_e2_bridge e2_waypoint_patrol
 
 ### Q2：运行中小车持续发出连续的“滴-滴-滴...”提示音？
 - **原厂诊断**：手册第 6 章明确指出，该连续提示音表示动力电池已进入低电量警报状态（电压低于 `22.5 V`）。
-- **处理规范**：严禁强制继续作业，**立即停机并将小车推至原厂充电桩补充充电**；若电池电压充足仍报警，说明底盘内置控制器检测到底层硬件或通信错误码，应读取底盘错误码并联系映博智能售后技术支持，严禁私自拆卸底盘。
+- **处理规范**：严禁强制继续作业，**立即停机并将小车移回原厂充电桩补充充电**（应优先通过键盘低速遥控移回；**严禁在断电状态下强行硬推车体**以免损坏电机内部减速箱齿轮，确需人工移动须确认电机处于释放状态并轻缓推行）；若电池电压充足仍报警，说明底盘内置控制器检测到底层硬件或通信错误码，应读取底盘错误码并联系映博智能售后技术支持，严禁私自拆卸底盘。
 
 ### Q3：小车导航目的地存在偏移，或在地图中发生定位发散？
 - **原厂诊断**：可能由于测试场地环境光照剧烈变化、玻璃幕墙漫反射或开机初始位姿与地图偏差过大导致激光匹配失败。
-- **处理规范**：将小车安全推靠/移回充电桩（充电桩为全局最高置信度几何锚点）或已知显著特征点；在 RViz2 顶部点击 **2D Pose Estimate** 重新标定初始朝向，触发底盘的 `mode: "assist"` 激光辅助重定位，直到雷达点云与栅格边界完全重合后再下发导航点。
+- **处理规范**：将小车安全移回充电桩（优先低速遥控，严禁断电强推；充电桩为全局最高置信度几何锚点）或已知显著特征点；在 RViz2 顶部点击 **2D Pose Estimate** 重新标定初始朝向，触发底盘的 `mode: "assist"` 激光辅助重定位，直到雷达点云与栅格边界完全重合后再下发导航点。
 
 ### Q4：无法自动充电或充电指示灯状态异常？
 - **原厂诊断与处理**：
@@ -360,4 +365,4 @@ ros2 run yunyan_e2_bridge e2_waypoint_patrol
 
 ### Q5：RViz2 中 `/e2/map` 或 `/e2/plan` 未渲染？
 - **诊断**：可能是现场实车固件 API 返回的 JSON 字段格式与通用协议存在差异（例如嵌套层级不同或栅格编码方式差异）。
-- **处理规范**：查看 `/tmp/e2_probe_dump.json`，核验实车返回的原始 JSON 数据；当前 `e2_bridge_node` 已全面兼容 Base64 栅格编码、二维数值矩阵以及嵌套的 `map/points` 路径格式；若发现实车返回了新字段，请将 dump 文件提取后补充适配解析逻辑。
+- **处理规范**：查看 `/tmp/e2_probe_dump.json`，核验实车返回的原始 JSON 数据；当前 `e2_bridge_node` 与 `e2_api_client` 已全面兼容 Base64 栅格编码、二维数值矩阵以及嵌套的 `path`/`points`/JSON 字符串形式的路径响应；若发现实车返回了新字段，请将 dump 文件提取后补充适配解析逻辑。

@@ -57,7 +57,10 @@ def run_probe(base_url: str) -> bool:
                 'method': method,
                 'status_code': status,
                 'latency_ms': round(elapsed_ms, 2),
-                'response': content_json if content_json else resp.text[:200],
+                'response': (
+                    content_json if content_json is not None
+                    else resp.text[:200]
+                ),
             })
         except Exception as e:
             all_success = False

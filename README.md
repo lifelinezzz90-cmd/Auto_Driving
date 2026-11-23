@@ -56,6 +56,7 @@ sudo apt install -y \
   ros-humble-teleop-twist-keyboard \
   python3-requests \
   python3-yaml \
+  python3-pil \
   python3-flake8 \
   python3-pytest
 ```

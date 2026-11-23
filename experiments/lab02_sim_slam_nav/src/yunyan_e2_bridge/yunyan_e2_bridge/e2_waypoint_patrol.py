@@ -3,6 +3,7 @@
 import math
 import os
 import signal
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from geometry_msgs.msg import PoseStamped
@@ -22,9 +23,9 @@ def yaw_to_quaternion(yaw: float) -> Tuple[float, float, float, float]:
 class E2WaypointPatrolNode(Node):
     """Node orchestrating multi-point waypoint patrol on PadBot E2."""
 
-    def __init__(self) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize waypoint patrol node."""
-        super().__init__('e2_waypoint_patrol')
+        super().__init__('e2_waypoint_patrol', *args, **kwargs)
 
         # Determine default waypoints file path
         try:
@@ -57,27 +58,18 @@ class E2WaypointPatrolNode(Node):
         self.retry_on_fail = int(config.get('retry_on_fail', 1))
         self.waypoints: List[Dict[str, Any]] = config.get('waypoints', [])
 
-        if not self.waypoints:
-            self.get_logger().warn(
-                'No waypoints loaded! Using default (1.0, 0.0, 0.0).'
-            )
-            self.waypoints = [
-                {'name': 'default', 'x': 1.0, 'y': 0.0, 'yaw': 0.0}
-            ]
-
-        self.get_logger().info(
-            f'Patrol configured: {len(self.waypoints)} waypoints, '
-            f'loops={self.loops}, timeout={self.goal_timeout_sec}s, '
-            f'dwell={self.dwell_sec}s, retry={self.retry_on_fail}'
-        )
-
         # State machine variables
         self.state = 'SEND_GOAL'
         self.current_wp_idx = 0
         self.completed_loops = 0
         self.current_retry = 0
         self._last_status: Optional[str] = None
+        self._status_seq = 0
+        self._goal_sent_status_seq = 0
+        self._cancel_future: Optional[Any] = None
+        self._cancel_start_time = self.get_clock().now()
         self._shutdown_requested = False
+        self.init_failed = False
 
         self.goal_start_time = self.get_clock().now()
         self.wait_exec_start_time = self.get_clock().now()
@@ -95,6 +87,21 @@ class E2WaypointPatrolNode(Node):
         # 10Hz state machine timer
         self.timer = self.create_timer(0.1, self._state_step)
 
+        if not self.waypoints:
+            self.get_logger().error(
+                'No waypoints loaded! Config missing or waypoints empty. '
+                'Aborting patrol and publishing NO goal.'
+            )
+            self.state = 'DONE'
+            self.init_failed = True
+            return
+
+        self.get_logger().info(
+            f'Patrol configured: {len(self.waypoints)} waypoints, '
+            f'loops={self.loops}, timeout={self.goal_timeout_sec}s, '
+            f'dwell={self.dwell_sec}s, retry={self.retry_on_fail}'
+        )
+
     def _load_yaml_config(self, path: str) -> Dict[str, Any]:
         """Load and parse waypoints YAML configuration file."""
         if not os.path.exists(path):
@@ -109,7 +116,8 @@ class E2WaypointPatrolNode(Node):
             return {}
 
     def _on_action_status(self, msg: String) -> None:
-        """Cache latest motion action status."""
+        """Cache latest motion action status and increment seq."""
+        self._status_seq += 1
         self._last_status = msg.data.strip().upper()
 
     def request_shutdown(self) -> None:
@@ -118,7 +126,11 @@ class E2WaypointPatrolNode(Node):
 
     def is_done(self) -> bool:
         """Return True if patrol finished or shutdown requested."""
-        return self.state == 'DONE' or self._shutdown_requested
+        return (
+            self.state == 'DONE'
+            or self._shutdown_requested
+            or self.init_failed
+        )
 
     def cancel_navigation_sync(self, timeout_sec: float = 2.0) -> None:
         """Cancel navigation synchronously on /e2/cancel_navigation."""
@@ -145,7 +157,11 @@ class E2WaypointPatrolNode(Node):
 
     def _state_step(self) -> None:
         """Periodic state machine transition step."""
-        if self._shutdown_requested or self.state == 'DONE':
+        if (
+            self._shutdown_requested
+            or self.state == 'DONE'
+            or self.init_failed
+        ):
             return
 
         now = self.get_clock().now()
@@ -174,6 +190,10 @@ class E2WaypointPatrolNode(Node):
                 f'Dispatching "{name}" -> '
                 f'(x={x:.2f}, y={y:.2f}, yaw={yaw:.2f})'
             )
+
+            # P1-4: Reset old status before publishing new goal
+            self._last_status = None
+            self._goal_sent_status_seq = self._status_seq
             self.pub_goal.publish(goal_msg)
 
             self.goal_start_time = now
@@ -183,10 +203,15 @@ class E2WaypointPatrolNode(Node):
         elif self.state == 'WAIT_EXEC':
             wp = self.waypoints[self.current_wp_idx]
             dt_exec = (now - self.wait_exec_start_time).nanoseconds / 1e9
+            has_new_status = self._status_seq > self._goal_sent_status_seq
 
             if self._last_status == 'EXECUTING':
                 self.state = 'WAIT_RESULT'
-            elif self._last_status == 'SUCCEEDED' and dt_exec > 0.5:
+            elif (
+                has_new_status
+                and self._last_status == 'SUCCEEDED'
+                and dt_exec > 1.5
+            ):
                 # Arrived immediately (close target)
                 self.get_logger().info(
                     f'Waypoint "{wp.get("name")}" reached immediately!'
@@ -223,9 +248,34 @@ class E2WaypointPatrolNode(Node):
             elif dt_goal > self.goal_timeout_sec:
                 self.get_logger().warn(
                     f'Waypoint "{wp.get("name")}" timed out after '
-                    f'{dt_goal:.1f}s (limit: {self.goal_timeout_sec:.1f}s).'
+                    f'{dt_goal:.1f}s (limit: {self.goal_timeout_sec:.1f}s). '
+                    'Canceling navigation asynchronously...'
                 )
-                self.cancel_navigation_sync(timeout_sec=1.0)
+                if self.cancel_client.wait_for_service(timeout_sec=0.2):
+                    self._cancel_future = self.cancel_client.call_async(
+                        Trigger.Request()
+                    )
+                    self.state = 'WAIT_CANCEL'
+                    self._cancel_start_time = now
+                else:
+                    self.get_logger().warn(
+                        '/e2/cancel_navigation service unavailable for cancel.'
+                    )
+                    self._handle_failure()
+
+        elif self.state == 'WAIT_CANCEL':
+            dt_cancel = (now - self._cancel_start_time).nanoseconds / 1e9
+            if self._cancel_future is not None and self._cancel_future.done():
+                res = self._cancel_future.result()
+                msg = res.message if res else 'OK'
+                self.get_logger().info(
+                    f'Async cancel navigation response: {msg}'
+                )
+                self._handle_failure()
+            elif dt_cancel > 1.0:
+                self.get_logger().warn(
+                    'Timed out waiting for async cancel response.'
+                )
                 self._handle_failure()
 
         elif self.state == 'DWELL':
@@ -281,6 +331,16 @@ def main(args: Optional[Any] = None) -> None:
     """Entry point with clean Ctrl+C safety shutdown."""
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = E2WaypointPatrolNode()
+
+    # Fast exit if waypoints configuration failed to load
+    if getattr(node, 'init_failed', False):
+        node.get_logger().error(
+            'Node initialization failed (missing/empty waypoints). '
+            'Exiting immediately without canceling.'
+        )
+        node.destroy_node()
+        rclpy.shutdown()
+        sys.exit(1)
 
     shutdown_flag = False
 

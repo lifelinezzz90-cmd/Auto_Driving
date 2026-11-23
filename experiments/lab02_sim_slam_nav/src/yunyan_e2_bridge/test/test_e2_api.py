@@ -8,12 +8,19 @@ import os
 import tempfile
 import threading
 import time
+from unittest.mock import MagicMock, patch
 
+from geometry_msgs.msg import Twist
 from PIL import Image
 import pytest
+import rclpy
+from rclpy.parameter import Parameter
+from rclpy.signals import SignalHandlerOptions
+
 from yunyan_e2_bridge.e2_api_client import E2ApiClient
 from yunyan_e2_bridge.e2_bridge_node import (
     _parse_occupancy_grid,
+    E2BridgeNode,
     save_occupancy_grid_to_pgm_yaml,
 )
 from yunyan_e2_bridge.e2_mock_server import (
@@ -187,7 +194,6 @@ def test_waypoint_patrol_config_and_helpers(tmp_path):
         '    yaw: 1.57\n'
     )
 
-    # Instantiation check for loader without starting ROS node loop
     loader = E2WaypointPatrolNode._load_yaml_config
     cfg = loader(None, str(test_yaml))
     assert cfg.get('loops') == 2
@@ -236,3 +242,206 @@ def test_probe_utility(mock_server):
     ok = run_probe(mock_server)
     assert ok is True
     assert os.path.exists('/tmp/e2_probe_dump.json')
+
+
+def test_waypoint_patrol_missing_waypoints_abort(tmp_path):
+    """Test patrol node aborts and never falls back to default waypoint."""
+    if not rclpy.ok():
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+
+    # 1. Non-existent file aborts without publishing goal
+    node_missing = E2WaypointPatrolNode(
+        parameter_overrides=[
+            Parameter(
+                'waypoints_file',
+                Parameter.Type.STRING,
+                '/tmp/non_existent_waypoints_12345.yaml',
+            )
+        ]
+    )
+    assert node_missing.init_failed is True
+    assert node_missing.state == 'DONE'
+    assert len(node_missing.waypoints) == 0
+    assert node_missing.is_done() is True
+    node_missing._state_step()
+    assert node_missing.state == 'DONE'
+    node_missing.destroy_node()
+
+    # 2. Existing file with empty waypoints list
+    empty_file = tmp_path / 'empty_wp.yaml'
+    empty_file.write_text('loops: 1\nwaypoints: []\n')
+    node_empty = E2WaypointPatrolNode(
+        parameter_overrides=[
+            Parameter(
+                'waypoints_file',
+                Parameter.Type.STRING,
+                str(empty_file),
+            )
+        ]
+    )
+    assert node_empty.init_failed is True
+    assert node_empty.state == 'DONE'
+    assert len(node_empty.waypoints) == 0
+    node_empty.destroy_node()
+
+
+def test_api_client_data_unwrap_and_validation():
+    """Test _unwrap_data, missing x/y, and boolean rejection."""
+    client = E2ApiClient(base_url='http://127.0.0.1:9999')
+
+    # 1. Test get_slam_mode with nested data
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {'data': {'mode': 1}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        assert client.get_slam_mode() == 1
+
+    # Missing mode key returns None, NOT 0
+    mock_resp.json.return_value = {'data': {'other_key': 123}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        assert client.get_slam_mode() is None
+
+    # 2. Test get_pose with nested data and missing coordinates
+    mock_resp.json.return_value = {'data': {'x': 2.5, 'y': -3.0, 'yaw': 1.2}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        pose = client.get_pose()
+        assert pose == (2.5, -3.0, 1.2)
+
+    # Missing x or y MUST return None, NOT (0.0, 0.0, 0.0)
+    mock_resp.json.return_value = {'data': {'x': 2.5}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        assert client.get_pose() is None
+
+    mock_resp.json.return_value = {'data': {'yaw': 1.2}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        assert client.get_pose() is None
+
+    # Non-convertible float returns None
+    mock_resp.json.return_value = {'data': {'x': 'invalid', 'y': 1.0}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        assert client.get_pose() is None
+
+    # 3. Test get_action_status excludes bool
+    mock_resp.json.return_value = {'data': {'status': True}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        assert client.get_action_status() is None
+
+    mock_resp.json.return_value = {'data': {'status': False}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        assert client.get_action_status() is None
+
+    # Valid status string
+    mock_resp.json.return_value = {'data': {'status': 'SUCCEEDED'}}
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        assert client.get_action_status() == E2ApiClient.STATUS_SUCCEEDED
+
+    # 4. Test get_remaining_path with nested points / path
+    mock_resp.json.return_value = {
+        'data': {'points': [{'x': 1.0, 'y': 2.0}]}
+    }
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        path = client.get_remaining_path()
+        assert path == [{'x': 1.0, 'y': 2.0}]
+
+    mock_resp.json.return_value = {
+        'data': {'path': '[{"x": 3.0, "y": 4.0}]'}
+    }
+    with patch.object(client.session, 'get', return_value=mock_resp):
+        path = client.get_remaining_path()
+        assert path == [{'x': 3.0, 'y': 4.0}]
+
+
+def test_cmd_vel_watchdog_timeout():
+    """Test cmd_vel watchdog triggers cancel_goal upon timeout."""
+    if not rclpy.ok():
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+
+    node = E2BridgeNode(
+        parameter_overrides=[
+            Parameter('teleop_watchdog_sec', Parameter.Type.DOUBLE, 0.1),
+            Parameter('publish_tf', Parameter.Type.BOOL, False),
+        ]
+    )
+    node.client = MagicMock(spec=E2ApiClient)
+
+    # Simulate non-zero cmd_vel
+    twist = Twist()
+    twist.linear.x = 0.2
+    node._on_cmd_vel(twist)
+
+    with node._cmd_lock:
+        assert node._last_cmd_nonzero is True
+
+    # Sleep past watchdog interval
+    time.sleep(0.15)
+    node._on_teleop_watchdog_timer()
+
+    with node._cmd_lock:
+        assert node._last_cmd_nonzero is False
+
+    node.client.cancel_goal.assert_called_once()
+    node.destroy_node()
+
+
+def test_motion_velocity_clamping():
+    """Test low-level velocity limit clamps in E2ApiClient."""
+    client = E2ApiClient(base_url='http://127.0.0.1:9999')
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+
+    with patch.object(client.session, 'post', return_value=mock_resp) as p:
+        # Request 1.5 m/s, clamped to max_linear_vel (0.6 m/s)
+        client.move_rectilinear(
+            dist=1.0, linear_vel=1.5, max_linear_vel=0.6
+        )
+        _, kwargs = p.call_args
+        assert kwargs['json']['linearVel'] == 0.6
+
+        # Request 2.0 rad/s, clamped to max_angular_vel (1.0 rad/s)
+        client.move_rotation(
+            radian=1.57, angular_vel=2.0, max_angular_vel=1.0
+        )
+        _, kwargs = p.call_args
+        assert kwargs['json']['angularVel'] == 1.0
+
+
+def test_base64_grid_origin_parsing():
+    """Test base64 grid parsing preserves custom origin dict/list."""
+    test_img = Image.new('L', (4, 4), color=255)
+    buf = io.BytesIO()
+    test_img.save(buf, format='PNG')
+    b64_data = base64.b64encode(buf.getvalue()).decode('ascii')
+
+    raw_dict = {
+        'image': b64_data,
+        'resolution': 0.05,
+        'origin': {'x': -1.5, 'y': -2.5, 'yaw': 0.785},
+    }
+    grid = _parse_occupancy_grid(raw_dict)
+    assert grid is not None
+    assert math.isclose(grid.info.origin.position.x, -1.5, abs_tol=1e-3)
+    assert math.isclose(grid.info.origin.position.y, -2.5, abs_tol=1e-3)
+
+
+def test_api_client_error_throttling_and_422():
+    """Test 422 status logging and 5.0s per-interface log throttling."""
+    client = E2ApiClient(base_url='http://127.0.0.1:9999')
+    mock_resp = MagicMock()
+    mock_resp.status_code = 422
+    mock_resp.text = '{"detail": "Unprocessable Entity"}'
+
+    with patch.object(client.session, 'post', return_value=mock_resp):
+        with patch(
+            'yunyan_e2_bridge.e2_api_client.logger.warning'
+        ) as mock_warn:
+            # First failure logs warning
+            ok = client.send_goal(1.0, 2.0, 0.0)
+            assert ok is False
+            mock_warn.assert_called_once()
+            assert '422' in mock_warn.call_args[0][0]
+
+            # Immediate second failure is throttled (no duplicate log)
+            mock_warn.reset_mock()
+            ok = client.send_goal(1.0, 2.0, 0.0)
+            assert ok is False
+            mock_warn.assert_not_called()
