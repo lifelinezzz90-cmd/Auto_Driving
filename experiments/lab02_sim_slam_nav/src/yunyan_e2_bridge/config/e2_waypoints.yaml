@@ -1,0 +1,23 @@
+# E2 Autonomous Waypoint Patrol Configuration
+loops: 1
+goal_timeout_sec: 45.0
+dwell_sec: 2.0
+retry_on_fail: 1
+
+waypoints:
+  - name: "point_A"
+    x: 1.5
+    y: 0.0
+    yaw: 0.0
+  - name: "point_B"
+    x: 2.0
+    y: 1.5
+    yaw: 1.57
+  - name: "point_C"
+    x: 0.0
+    y: 1.5
+    yaw: 3.14
+  - name: "origin"
+    x: 0.0
+    y: 0.0
+    yaw: 0.0

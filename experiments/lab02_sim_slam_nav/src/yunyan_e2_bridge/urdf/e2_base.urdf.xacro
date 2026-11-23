@@ -1,0 +1,138 @@
+<?xml version="1.0"?>
+<robot name="padbot_e2" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Materials -->
+  <material name="e2_white">
+    <color rgba="0.92 0.93 0.94 1.0"/>
+  </material>
+  <material name="e2_dark">
+    <color rgba="0.15 0.15 0.18 1.0"/>
+  </material>
+  <material name="e2_blue_accent">
+    <color rgba="0.1 0.55 0.95 1.0"/>
+  </material>
+  <material name="e2_screen">
+    <color rgba="0.05 0.08 0.12 1.0"/>
+  </material>
+
+  <!-- base_footprint (Ground projection) -->
+  <link name="base_footprint"/>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.076" rpy="0 0 0"/>
+  </joint>
+
+  <!-- base_link (Wheel axis center) -->
+  <link name="base_link">
+    <!-- Main chassis cylindrical body (Diameter ~0.55m, Height 0.40m) -->
+    <visual>
+      <origin xyz="0 0 0.16" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.275" length="0.32"/>
+      </geometry>
+      <material name="e2_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.16" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.275" length="0.32"/>
+      </geometry>
+    </collision>
+    <!-- LED strip ring accent near bottom -->
+    <visual>
+      <origin xyz="0 0 0.01" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.278" length="0.02"/>
+      </geometry>
+      <material name="e2_blue_accent"/>
+    </visual>
+  </link>
+
+  <!-- Upper mast and head display (Total height 1.25m) -->
+  <joint name="mast_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="mast_link"/>
+    <origin xyz="0 0 0.32" rpy="0 0 0"/>
+  </joint>
+
+  <link name="mast_link">
+    <!-- Central support column -->
+    <visual>
+      <origin xyz="0 0 0.38" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.12 0.14 0.76"/>
+      </geometry>
+      <material name="e2_white"/>
+    </visual>
+    <!-- Head display unit -->
+    <visual>
+      <origin xyz="0.04 0 0.80" rpy="0 0.25 0"/>
+      <geometry>
+        <box size="0.05 0.28 0.20"/>
+      </geometry>
+      <material name="e2_dark"/>
+    </visual>
+    <!-- Screen glass -->
+    <visual>
+      <origin xyz="0.066 0 0.80" rpy="0 0.25 0"/>
+      <geometry>
+        <box size="0.005 0.25 0.17"/>
+      </geometry>
+      <material name="e2_screen"/>
+    </visual>
+  </link>
+
+  <!-- Lidar sensor (Front-facing scanner) -->
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_link"/>
+    <origin xyz="0.20 0 0.26" rpy="0 0 0"/>
+  </joint>
+
+  <link name="laser_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.04" length="0.05"/>
+      </geometry>
+      <material name="e2_dark"/>
+    </visual>
+  </link>
+
+  <!-- Left wheel (6 inch ~ 0.152m diameter) -->
+  <joint name="left_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_wheel_link"/>
+    <origin xyz="0 0.22 0" rpy="-1.5708 0 0"/>
+  </joint>
+
+  <link name="left_wheel_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.076" length="0.04"/>
+      </geometry>
+      <material name="e2_dark"/>
+    </visual>
+  </link>
+
+  <!-- Right wheel -->
+  <joint name="right_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_wheel_link"/>
+    <origin xyz="0 -0.22 0" rpy="-1.5708 0 0"/>
+  </joint>
+
+  <link name="right_wheel_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.076" length="0.04"/>
+      </geometry>
+      <material name="e2_dark"/>
+    </visual>
+  </link>
+
+</robot>

@@ -1,0 +1,271 @@
+<?xml version="1.0"?>
+<robot name="yunyan_car" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- 基础材质定义 -->
+  <material name="chassis_orange">
+    <color rgba="1.0 0.45 0.0 1.0"/>
+  </material>
+
+  <material name="wheel_dark">
+    <color rgba="0.2 0.2 0.2 1.0"/>
+  </material>
+
+  <material name="laser_black">
+    <color rgba="0.05 0.05 0.05 1.0"/>
+  </material>
+
+  <material name="caster_metal">
+    <color rgba="0.7 0.7 0.7 1.0"/>
+  </material>
+
+  <!-- 1. base_footprint: 地面投影参考系 (Z=0) -->
+  <link name="base_footprint"/>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <!-- 驱动轮半径为 0.0325m，轮轴中心距离地面 0.0325m -->
+    <origin xyz="0 0 0.0325" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 2. base_link: 机器人底盘本体 (以驱动轮轴中心为原点) -->
+  <link name="base_link">
+    <visual>
+      <!-- 底盘尺寸: 长 0.24m, 宽 0.18m, 高 0.08m，底部紧贴轮轴高度 -->
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.24 0.18 0.08"/>
+      </geometry>
+      <material name="chassis_orange"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.24 0.18 0.08"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <mass value="1.2"/>
+      <inertia ixx="0.00388" ixy="0.0" ixz="0.0"
+               iyy="0.00640" iyz="0.0"
+               izz="0.00900"/>
+    </inertial>
+  </link>
+
+  <!-- 3. 左驱动轮 (left_wheel_link) -->
+  <link name="left_wheel_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0325" length="0.02"/>
+      </geometry>
+      <material name="wheel_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0325" length="0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.1"/>
+      <inertia ixx="0.0000297" ixy="0.0" ixz="0.0"
+               iyy="0.0000297" iyz="0.0"
+               izz="0.0000528"/>
+    </inertial>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="left_wheel_link"/>
+    <!-- 间距 0.20m => Y = +0.10m，轴向沿 Y 方向旋转 -->
+    <origin xyz="-0.04 0.10 0" rpy="-1.57079632679 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- 4. 右驱动轮 (right_wheel_link) -->
+  <link name="right_wheel_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0325" length="0.02"/>
+      </geometry>
+      <material name="wheel_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0325" length="0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.1"/>
+      <inertia ixx="0.0000297" ixy="0.0" ixz="0.0"
+               iyy="0.0000297" iyz="0.0"
+               izz="0.0000528"/>
+    </inertial>
+  </link>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="right_wheel_link"/>
+    <!-- 间距 0.20m => Y = -0.10m，轴向沿 Y 方向旋转 -->
+    <origin xyz="-0.04 -0.10 0" rpy="-1.57079632679 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- 5. 支撑万向轮 (caster_wheel_link, 球体半径 0.01625m, 底部切齐地面 -0.0325m) -->
+  <link name="caster_wheel_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.01625"/>
+      </geometry>
+      <material name="caster_metal"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.01625"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="0.00000528" ixy="0.0" ixz="0.0"
+               iyy="0.00000528" iyz="0.0"
+               izz="0.00000528"/>
+    </inertial>
+  </link>
+
+  <joint name="caster_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster_wheel_link"/>
+    <origin xyz="0.08 0.0 -0.01625" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 6. 激光雷达 (laser_link) -->
+  <!-- 底盘顶部在 Z=0.08m，雷达高出底盘 0.05m => Z=0.13m，中心偏前 X=0.05m -->
+  <link name="laser_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.04"/>
+      </geometry>
+      <material name="laser_black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.04"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.12"/>
+      <inertia ixx="0.00005275" ixy="0.0" ixz="0.0"
+               iyy="0.00005275" iyz="0.0"
+               izz="0.0000735"/>
+    </inertial>
+  </link>
+
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_link"/>
+    <origin xyz="0.05 0.0 0.13" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Gazebo 物理与外观扩展参数 -->
+  <gazebo reference="base_link">
+    <material>Gazebo/Orange</material>
+  </gazebo>
+
+  <gazebo reference="left_wheel_link">
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+    <kp>1000000.0</kp>
+    <kd>1.0</kd>
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+
+  <gazebo reference="right_wheel_link">
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+    <kp>1000000.0</kp>
+    <kd>1.0</kd>
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+
+  <gazebo reference="caster_wheel_link">
+    <mu1>0.0001</mu1>
+    <mu2>0.0001</mu2>
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <gazebo reference="laser_link">
+    <material>Gazebo/FlatBlack</material>
+  </gazebo>
+
+  <!-- Gazebo 差速驱动插件 -->
+  <gazebo>
+    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>cmd_vel:=cmd_vel</remapping>
+        <remapping>odom:=odom</remapping>
+      </ros>
+      <update_rate>50</update_rate>
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>0.20</wheel_separation>
+      <wheel_diameter>0.065</wheel_diameter>
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>1.0</max_wheel_acceleration>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+    </plugin>
+  </gazebo>
+
+  <!-- Gazebo 激光雷达插件 -->
+  <gazebo reference="laser_link">
+    <sensor name="rplidar_sensor" type="ray">
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>10.0</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.15</min>
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </ray>
+      <plugin name="rplidar_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=rpl_scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>laser_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+</robot>
